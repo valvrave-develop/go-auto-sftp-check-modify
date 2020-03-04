@@ -1,0 +1,37 @@
+{
+  "project": [{
+    "switch": "off",
+    "name": "dstorage-parking-rpc",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\workspace\\go\\dstorage-parking-rpc",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave/workspace/go",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\dstorage-parking-rpc-save.txt"
+  },{
+    "switch": "off",
+    "name": "dstorage-parking-token",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\workspace\\go\\dstorage-parking-token",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave/workspace/go",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\dstorage-parking-token-save.txt"
+  },{
+      "switch": "on",
+      "name": "dstorage",
+      "local_os": "Windows",
+      "local_base_dir": "E:\\workspace\\go\\dstorage",
+      "remote_os": "Linux",
+      "remote_base_dir": "/home/valvrave/workspace/go",
+      "remote_address": "192.168.56.101:22",
+      "user": "valvrave",
+      "passwd": "valvrave",
+      "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\dstorage.txt"
+    }
+  ]
+}
