@@ -205,7 +205,9 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 					return nil, fmt.Errorf("traversal directory failed, errMsg:%v", err)
 				}
 				dir.DirChild = append(dir.DirChild, childDir)
-				dir.Status = Modify
+				if dir.Status == Same {
+					dir.Status = Modify
+				}
 			}else{
 				for _, dirChild := range dir.DirChild {
 					if dirChild.DirName == absolutePath{
@@ -225,7 +227,9 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 					if file.ModifyTime.Before(ele.ModTime()) {
 						file.ModifyTime = ele.ModTime()
 						file.Status = Update
-						dir.Status = Modify
+						if dir.Status == Same {
+							dir.Status = Modify
+						}
 					}
 					continueFlag = true
 					break
@@ -241,7 +245,9 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 				Status:Add,
 			}
 			dir.File = append(dir.File, file)
-			dir.Status = Modify
+			if dir.Status == Same {
+				dir.Status = Modify
+			}
 		}
 	}
 	deleteKey := make([]string, 0, defaultSliceLength)
@@ -255,12 +261,16 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 			//注意：上述处理中只会递归检测仍然存在的目录，对于已删除的目录不会检测，因此不会出现递归目录中存在多个删除目录事件
 			//即被删除目录可以直接删除，不用检测其上级目录是否存在
 			dirIndex[file].Status = Delete
-			dir.Status = Modify
+			if dir.Status == Same {
+				dir.Status = Modify
+			}
 		}else{
 			for _, f := range dir.File {
 				if f.Name == file{
 					f.Status = Delete
-					dir.Status = Modify
+					if dir.Status == Same {
+						dir.Status = Modify
+					}
 				}
 			}
 		}
@@ -268,7 +278,7 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 	for _, file := range deleteKey {
 		delete(dir.ExistFile, file)
 	}
-	if dir.Status == Modify {
+	if dir.Status != Same {
 		modifyDir = append(modifyDir, dir.DirName)
 	}
 	return modifyDir, nil
@@ -282,8 +292,7 @@ func upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep str
 		fallthrough
 	case Add:
 		if dir.Status == Add {
-			index := strings.LastIndex(remotePath, remoteSep)
-			if err := client.Mkdir(filepath.Base(dir.DirName), remotePath[:index]); err != nil {
+			if err := client.Mkdir(remotePath); err != nil {
 				return err
 			}
 		}
@@ -300,12 +309,12 @@ func upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep str
 			case Add:
 				fallthrough
 			case Update:
-				if err := client.Put(file.Name, remotePath); err != nil {
+				if err := client.Put(file.Name, strings.Join([]string{remotePath, filepath.Base(file.Name)}, remoteSep)); err != nil {
 					return err
 				}
 				file.Status = Same
 			case Delete:
-				if err := client.Remove(file.Name, remotePath); err != nil {
+				if err := client.Remove(strings.Join([]string{remotePath, filepath.Base(file.Name)}, remoteSep)); err != nil {
 					return err
 				}
 				file.Status = ShiftDelete
@@ -313,15 +322,13 @@ func upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep str
 		}
 		dir.Status = Same
 	case Delete:
-		index := strings.LastIndex(remotePath, remoteSep)
-		if err := client.RemoveDirectory(filepath.Base(dir.DirName), remotePath[:index]); err != nil {
+		if err := client.RemoveDirectory(remotePath); err != nil {
 			return err
 		}
 		dir.Status = ShiftDelete
 	}
 	return nil
 }
-
 
 func clear(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct) {
 	for _, nextDir := range dir.DirChild {
