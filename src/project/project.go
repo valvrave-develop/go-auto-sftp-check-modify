@@ -2,6 +2,7 @@ package project
 
 import (
 	"conf"
+	"context"
 	"dir"
 	"fmt"
 	"io"
@@ -10,6 +11,12 @@ import (
 	"sftp"
 	"strings"
 	"sync"
+	"time"
+	"util"
+)
+
+const (
+	sftpTimeout = 5 * time.Second
 )
 
 type Project struct {
@@ -22,16 +29,19 @@ type Project struct {
 	RemoteBaseDir string
 	RemoteSeparator string
 	SaveProject string
+	Dirs *dir.Directory
+
 	localSeparator string
 	remoteSeparator string
 	dirFp *os.File
 	fp *os.File
-	dirs dir.Directory
 	client sftp.Sftp
-	mutex sync.Mutex
+	ctx context.Context
+	cancel context.CancelFunc
+	group sync.WaitGroup
 }
 
-func NewProject(conf *conf.ConfigElement) *Project {
+func newProject(conf *conf.ProjectConfig) *Project {
 	project := &Project{
 		ProjectName:conf.Name,
 		User:conf.User,
@@ -44,78 +54,129 @@ func NewProject(conf *conf.ConfigElement) *Project {
 		remoteSeparator:separator(conf.RemoteOs),
 		dirFp:nil,
 		fp:nil,
-		dirs:dir.New(),
-		mutex:sync.Mutex{},
+		Dirs:dir.New(),
+		group:sync.WaitGroup{},
 	}
+	project.ctx, project.cancel = context.WithCancel(context.Background())
 	return project
 }
 
-func (p *Project) Open() error {
+func Open(conf *conf.ProjectConfig) (*Project, error) {
+	p := newProject(conf)
 	if !filepath.IsAbs(p.LocalBaseDir) {
-		return fmt.Errorf("%s is not absolute path", p.LocalBaseDir)
+		return nil, fmt.Errorf("%s is not absolute path", p.LocalBaseDir)
 	}
 	//锁住当前基目录，防止被手动删除
 	if dirFp, err := os.OpenFile(p.LocalBaseDir, os.O_RDONLY, os.ModeDir); err != nil {
-		return err
+		return nil, err
 	}else{
 		p.dirFp = dirFp
 	}
-	cli := sftp.NewClient(p.RemoteAddress, p.User, p.Passwd)
-	if err := cli.Connect(); err != nil{
-		return  err
+	cli,err := sftp.Dial(p.RemoteAddress, p.User, p.Passwd, sftpTimeout)
+	if err != nil{
+		return  nil, err
 	}
 	p.client = cli
-	_, err := os.Stat(p.SaveProject)
+	p.fp, err = os.OpenFile(p.SaveProject, os.O_RDWR, 0666)
 	if err != nil {
 		if os.IsNotExist(err) {
-			p.fp, err = os.Create(p.SaveProject)
-			if err != nil {
-				return err
+			if p.fp, err = os.Create(p.SaveProject); err != nil {
+				return nil, err
 			}
-			err = p.dirs.Open(p.LocalBaseDir) //遍历
-			if err != nil {
-				p.fp.Close()
-				return err
+			defer func(){
+				if err != nil {
+					p.fp.Close()
+				}
+			}()
+			if err = p.Dirs.Open(p.LocalBaseDir); err != nil { //遍历
+				return nil, err
 			}
-			initModify := make([]string,1)
-			initModify[0] = p.LocalBaseDir
-			err = p.Sftp(initModify)               //上传
-			if err != nil {
-				p.fp.Close()
-				return err
+			if err = p.sftp([]string{p.LocalBaseDir}); err != nil {          //上传
+				return nil,  err
 			}
-			if err := p.Write(); err != nil {    //保存
-				p.fp.Close()
-				return err
+			if err := p.write(); err != nil {    //保存
+				return nil, err
 			}
 		}else {
-			return err
+			return nil, err
 		}
 	}else{
-		p.fp, err = os.OpenFile(p.SaveProject, os.O_RDWR, 0666)
-		if err != nil {
-			return err
-		}
-		if err := p.Read(); err != nil {
+		if err := p.read(); err != nil {
 			p.fp.Close()
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	go p.run()
+	return p, nil
 }
 func (p *Project) Close(){
+	p.cancel()
+	p.group.Wait()
+	p.write()
 	p.dirFp.Close()
-	p.dirFp = nil
 	p.fp.Close()
-	p.fp = nil
-	p.dirs = nil
 	p.client.Close()
 }
 
-func (p *Project) Write() error {
+
+func (p *Project) run(){
+	run := func(){
+		p.group.Add(1)
+		checkTimer := time.NewTicker(2 * time.Second)
+		saveTimer := time.NewTicker(30 * time.Minute)
+		modifyCh := make(chan []string)
+		defer func(){
+			checkTimer.Stop()
+			saveTimer.Stop()
+			close(modifyCh)
+			p.group.Done()
+		}()
+		var e error
+		for {
+			e = nil
+			util.LogPrint("project", util.I, "Run",p.ProjectName,"watch")
+			select {
+			case <-p.ctx.Done():
+				util.LogPrint("project", util.I, "Run",p.ProjectName,"watch finish")
+				return
+			case <-checkTimer.C:
+				if res, err := p.Dirs.CheckModify(); err != nil {
+					e = fmt.Errorf("check failed:", err)
+				}else{
+					if len(res) >0 {
+						util.LogPrint("project", util.I, "Run",p.ProjectName, fmt.Sprint("modify:", res))
+						go func(){
+							defer func(){
+								recover()
+							}()
+							modifyCh <- res
+						}()
+					}
+				}
+			case <-saveTimer.C:
+				if err := p.write(); err != nil {
+					e = fmt.Errorf("save failed:", err)
+				}
+			case res, ok := <-modifyCh:
+				if ok {
+					if err := p.sftp(res); err != nil {
+						e = fmt.Errorf("upload failed:", err)
+					}
+					util.LogPrint("project", util.I, "Run",p.ProjectName, fmt.Sprint("upload finish:", res))
+				}
+			}
+			if e != nil {
+				util.LogPrint("project", util.I, "Run",p.ProjectName,fmt.Sprint("watch failed:", e))
+			}
+		}
+	}
+	go run()
+}
+
+func (p *Project) write() error {
 	p.fp.Truncate(0)
 	p.fp.Seek(0, io.SeekStart)
-	if err := p.dirs.WriteJson(p.fp); err != nil {
+	if err := p.Dirs.EncodeJson(p.fp); err != nil {
 		return err
 	}
 	if err := p.fp.Sync(); err != nil {
@@ -123,37 +184,27 @@ func (p *Project) Write() error {
 	}
 	return nil
 }
-func (p *Project) Read() error {
-	return p.dirs.ReadJson(p.fp)
+func (p *Project) read() error {
+	return p.Dirs.DecodeJson(p.fp)
 }
 
-func (p *Project) CheckModify() ([]string, error) {
-	return p.dirs.CheckModify()
-}
-
-func (p *Project) Sftp( modify []string) error {
-	err := p.dirs.Modify(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
+func (p *Project) sftp( modify []string) error {
+	err := p.Dirs.Upload(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
 	for i:=1; i>=0; i-- {
 		if err == nil {
 			return err
 		}
-		p.client.Close()
-		cli := sftp.NewClient(p.RemoteAddress, p.User, p.Passwd)
-		if err := cli.Connect(); err != nil{
+		cli,err := sftp.Dial(p.RemoteAddress, p.User, p.Passwd, sftpTimeout)
+		if err != nil{
 			return  err
 		}
+		p.client.Close()
 		p.client = cli
-		err = p.dirs.Modify(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
+		err = p.Dirs.Upload(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
 	}
 	return err
 }
 
-func (p *Project) Lock(){
-	p.mutex.Lock()
-}
-func (p *Project) Unlock(){
-	p.mutex.Unlock()
-}
 
 func separator(os string) string {
 	osUpper := strings.ToUpper(os)

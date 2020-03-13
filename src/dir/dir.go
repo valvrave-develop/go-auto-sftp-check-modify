@@ -13,12 +13,11 @@ import (
 
 //文件状态
 const (
-	Same = iota      //文件当前状态：未变更
-	Modify           //文件当前状态：已修改，指目录，其包含的文件发生变化
-	Update           //文件当前状态：已更新，指文件本身
-	Add              //文件当前状态：新添加
-	Delete           //文件当前状态：已删除
-	ShiftDelete      //彻底删除文件
+	NotModify = iota //文件当前状态：未变更
+	Modify           //文件当前状态：已修改
+	Add              //文件当前状态：新增
+	Delete           //文件当前状态：已删除(磁盘)
+	ShiftDelete      //彻底删除文件（缓存记录）
 )
 
 const (
@@ -27,29 +26,21 @@ const (
 )
 
 
-type Directory interface {
-	ReadJson(r io.Reader) error
-	WriteJson(w io.Writer) error
-	Open(srcDir string) error
-	CheckModify() ([]string, error)
-	Modify(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep string, modify []string) error
+type Directory struct {
+	DirMap     map[string]*DirectoryStruct
+	Dir        *DirectoryStruct
 }
 
-
-type directory struct {
-	dirIndex   map[string]*DirectoryStruct
-	dir        *DirectoryStruct
-}
-
-func New() Directory{
-	return &directory{
-		dirIndex:   make(map[string]*DirectoryStruct),
-		dir:        new(DirectoryStruct),
+func New() *Directory{
+	return &Directory{
+		DirMap:   make(map[string]*DirectoryStruct),
+		Dir:      new(DirectoryStruct),
 	}
 }
 
 type DirectoryStruct struct {
 	DirName string                     `json:"dir_name"`            //目录文件名
+	ModifyTime time.Time               `json:"dir_modify_time"`     //目录的修改时间
 	DirChild []*DirectoryStruct        `json:"dir_child"`           //目录包含的子目录
 	File []*FileStruct                 `json:"file"`                //目录包含的非目录文件
 	Status int                         `json:"dir_status"`          //目录当前的存在状态
@@ -63,42 +54,39 @@ type FileStruct struct {
 	Status int  `json:"file_status"`
 }
 
-func (d *directory) WriteJson(w io.Writer) error {
+func (d *Directory) EncodeJson(w io.Writer) error {
 	encode := json.NewEncoder(w)
-	if err := encode.Encode(d.dir); err != nil {
+	if err := encode.Encode(d.Dir); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (d *directory) ReadJson(r io.Reader) error {
+func (d *Directory) DecodeJson(r io.Reader) error {
 	decode := json.NewDecoder(r)
-	if err := decode.Decode(d.dir); err != nil {
+	if err := decode.Decode(d.Dir); err != nil {
 		return err
 	}
-	return addDirIndex(d.dir, d.dirIndex)
+	fillDirIndex(d.Dir, d.DirMap)
+	return nil
 }
 
-func (d *directory) Open(srcDir string) error {
-	return traversalDir(srcDir, d.dir, d.dirIndex)
+func (d *Directory) Open(dir string) error {
+	return traversalDir(dir, d.Dir, d.DirMap)
 }
 
-func (d *directory) CheckModify() ([]string, error){
-	return checkDirModify(d.dir, d.dirIndex)
+func (d *Directory) CheckModify() ([]string, error){
+	return checkDirModify(d.Dir, d.DirMap)
 }
 
-func (d *directory) Modify(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep string, modify []string) error {
-	flag := true
+func (d *Directory) Upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep string, modify []string) error {
 	for _, path := range modify {
-		dir := d.dirIndex[path]
-		if dir.Status == Same {
+		dir := d.DirMap[path]
+		if dir.Status == NotModify {
 			continue
 		}
-		if flag {
-			defer clear(d.dir, d.dirIndex)
-			flag = false
-		}
 		err := upload(client,localBaseDir,remoteBaseDir,localSep,remoteSep,dir)
+		clear(dir, d.DirMap) //不管upload是否失败，都要clear一次
 		if err != nil {
 			return err
 		}
@@ -139,6 +127,7 @@ func traversalDir(srcDir string, dir *DirectoryStruct, dirIndex map[string]*Dire
 		absolutePath := fmt.Sprintf("%s%s%s",srcDir,string(filepath.Separator),ele.Name())
 		if ele.IsDir(){
 			childDir := new(DirectoryStruct)
+			childDir.ModifyTime = ele.ModTime()
 			if err := traversalDir(absolutePath, childDir, dirIndex); err != nil {
 				return fmt.Errorf("traversal directory failed, errMsg:%v", err)
 			}
@@ -157,26 +146,21 @@ func traversalDir(srcDir string, dir *DirectoryStruct, dirIndex map[string]*Dire
 	return nil
 }
 
-func addDirIndex(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct) error {
+func fillDirIndex(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct) {
 	if dir.ExistFile == nil {
 		dir.ExistFile = make(map[string]bool)
 	}
 	dir.ExistFlag = true
 	for _, child := range dir.DirChild {
 		dir.ExistFile[child.DirName] = dir.ExistFlag
-		if err := addDirIndex(child, dirIndex); err != nil {
-			return err
-		}
+		fillDirIndex(child, dirIndex)
 	}
 	for _, file := range dir.File {
 		dir.ExistFile[file.Name] = dir.ExistFlag
 	}
 	dirIndex[dir.DirName] = dir
-	return nil
 }
 
-//检查文件变化是根据本地基目录为基准的，所以不能检测到基目录是否被删除
-//基目录被删除检查会直接报错
 func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct) ([]string, error){
 	if !filepath.IsAbs(dir.DirName) {
 		return nil, fmt.Errorf("%s is not absolute path", dir.DirName)
@@ -191,7 +175,16 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 		return nil, fmt.Errorf("directory traversal:%s failed, errMs:%v", dir.DirName, err)
 	}
 	modifyDir := make([]string, 0, defaultSliceLength)
-	dir.ExistFlag = !dir.ExistFlag  //变更当前遍历目录的存在状态
+	dir.ExistFlag = !dir.ExistFlag  //表示新的一轮check
+	var e error = nil
+	defer func(){
+		if e != nil {
+			dir.ExistFlag = !dir.ExistFlag
+			for key, _ := range dir.ExistFile {
+				dir.ExistFile[key] = dir.ExistFlag
+			}
+		}
+	}()
 	for _, ele := range dirsContent {
 		if strings.Index(ele.Name(),prefixSkipFile) == 0 {
 			continue
@@ -201,24 +194,23 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 		if ele.IsDir(){
 			if _, ok := dirIndex[absolutePath]; !ok {  //不存在目录索引中，即新增目录，加载新的目录内容
 				childDir := new(DirectoryStruct)
+				childDir.ModifyTime = ele.ModTime()
 				if err := traversalDir(absolutePath, childDir, dirIndex); err != nil {
-					return nil, fmt.Errorf("traversal directory failed, errMsg:%v", err)
+					e = err
+					return nil, fmt.Errorf("traversal directory[%s] failed, errMsg:%v", absolutePath, err)
 				}
 				dir.DirChild = append(dir.DirChild, childDir)
-				if dir.Status == Same {
+				if dir.Status == NotModify {
 					dir.Status = Modify
 				}
 			}else{
-				for _, dirChild := range dir.DirChild {
-					if dirChild.DirName == absolutePath{
-						//只检测当前已存在的目录，目对于已经删除的录此处不会检测
-						modify, err := checkDirModify(dirChild, dirIndex)
-						if err != nil {
-							return nil, err
-						}
-						modifyDir = append(modifyDir, modify...)
-					}
+				dirIndex[absolutePath].ModifyTime = ele.ModTime()
+				modify, err := checkDirModify(dirIndex[absolutePath], dirIndex)
+				if err != nil {
+					e = err
+					return nil, fmt.Errorf("checkDirModify directory[%s] failed, errMsg:%v", absolutePath, err)
 				}
+				modifyDir = append(modifyDir, modify...)
 			}
 		}else{
 			continueFlag := false
@@ -226,8 +218,8 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 				if absolutePath == file.Name { //检查已存在的文件是否发生变化
 					if file.ModifyTime.Before(ele.ModTime()) {
 						file.ModifyTime = ele.ModTime()
-						file.Status = Update
-						if dir.Status == Same {
+						file.Status = Modify
+						if dir.Status == NotModify {
 							dir.Status = Modify
 						}
 					}
@@ -245,7 +237,7 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 				Status:Add,
 			}
 			dir.File = append(dir.File, file)
-			if dir.Status == Same {
+			if dir.Status == NotModify {
 				dir.Status = Modify
 			}
 		}
@@ -261,14 +253,14 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 			//注意：上述处理中只会递归检测仍然存在的目录，对于已删除的目录不会检测，因此不会出现递归目录中存在多个删除目录事件
 			//即被删除目录可以直接删除，不用检测其上级目录是否存在
 			dirIndex[file].Status = Delete
-			if dir.Status == Same {
+			if dir.Status == NotModify {
 				dir.Status = Modify
 			}
 		}else{
 			for _, f := range dir.File {
 				if f.Name == file{
 					f.Status = Delete
-					if dir.Status == Same {
+					if dir.Status == NotModify {
 						dir.Status = Modify
 					}
 				}
@@ -278,41 +270,62 @@ func  checkDirModify(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct)
 	for _, file := range deleteKey {
 		delete(dir.ExistFile, file)
 	}
-	if dir.Status != Same {
+	if dir.Status != NotModify {
 		modifyDir = append(modifyDir, dir.DirName)
 	}
 	return modifyDir, nil
 }
+//Modify的目录由checkModify校验返回
+//全量上传时，Modify的目录即Add的目录
+//增量上传时，只处理Modify目录的子目录，除了Add变更，也只有Delete不再递归处理。
+//增量上传时，要处理Modify目录下的所有更变文件，即Add，Modify，Delete
+//删除的目录会变更上一级目录的状态，即改为Modify，继而交到Modify处理子目录中
 
 func upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep string, dir *DirectoryStruct) error {
 	localBaseDirLen := len(localBaseDir)
 	remotePath := fmt.Sprintf("%s%s%s%s", remoteBaseDir, remoteSep, filepath.Base(localBaseDir), strings.Join(strings.Split(dir.DirName[localBaseDirLen:], localSep), remoteSep))
 	switch dir.Status {
-	case Modify:
-		fallthrough
 	case Add:
-		if dir.Status == Add {
-			if err := client.Mkdir(remotePath); err != nil {
+		if err := client.Mkdir(remotePath); err != nil {
+			return err
+		}
+		for _, nextDir := range dir.DirChild {
+			err := upload(client, localBaseDir, remoteBaseDir, localSep, remoteSep, nextDir)
+			if err != nil {
 				return err
 			}
 		}
+		for _, file := range dir.File {
+			if err := client.Put(file.Name, strings.Join([]string{remotePath, filepath.Base(file.Name)}, remoteSep)); err != nil {
+				return err
+			}
+			file.Status = NotModify
+		}
+		dir.Status = NotModify
+	case Modify:
 		for _, nextDir := range dir.DirChild {
-			if nextDir.Status != Same {
+			switch nextDir.Status {
+			case Add:
 				err := upload(client, localBaseDir, remoteBaseDir, localSep, remoteSep, nextDir)
 				if err != nil {
 					return err
 				}
+			case Delete:
+				if err := client.RemoveDirectory(strings.Join([]string{remotePath, filepath.Base(nextDir.DirName)}, remoteSep)); err != nil {
+					return err
+				}
+				nextDir.Status = ShiftDelete
 			}
 		}
 		for _, file := range dir.File {
 			switch file.Status {
 			case Add:
 				fallthrough
-			case Update:
+			case Modify:
 				if err := client.Put(file.Name, strings.Join([]string{remotePath, filepath.Base(file.Name)}, remoteSep)); err != nil {
 					return err
 				}
-				file.Status = Same
+				file.Status = NotModify
 			case Delete:
 				if err := client.Remove(strings.Join([]string{remotePath, filepath.Base(file.Name)}, remoteSep)); err != nil {
 					return err
@@ -320,12 +333,7 @@ func upload(client sftp.Sftp, localBaseDir,remoteBaseDir,localSep, remoteSep str
 				file.Status = ShiftDelete
 			}
 		}
-		dir.Status = Same
-	case Delete:
-		if err := client.RemoveDirectory(remotePath); err != nil {
-			return err
-		}
-		dir.Status = ShiftDelete
+		dir.Status = NotModify
 	}
 	return nil
 }
@@ -347,9 +355,6 @@ func clear(dir *DirectoryStruct, dirIndex map[string]*DirectoryStruct) {
 		}else{
 			i++
 		}
-	}
-	if len(dir.DirChild) == 0 {
-		return
 	}
 	total = len(dir.DirChild)
 	i = 0

@@ -8,10 +8,10 @@ import (
 )
 
 type Config struct {
-	Conf []*ConfigElement `json:"project"`
+	Conf []*ProjectConfig `json:"project"`
 }
 
-type ConfigElement struct {
+type ProjectConfig struct {
 	Switch string           `json:"switch"`
 	Name string             `json:"name"`
 	User string             `json:"user"`

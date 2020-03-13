@@ -1,26 +1,40 @@
 package project
 
 import (
+	"bytes"
 	"conf"
-	"os"
+	"encoding/json"
 	"testing"
 )
 
 func TestProject_Open(t *testing.T) {
-	os.Args[1] = "..\\etc\\project.json"
-	config,err := conf.InitConfig()
-	if err != nil {
-		t.Error("init configure failed, errMsg:", err)
-	}
-	t.Log(config.Conf)
-	config.Conf[0].SaveProject="..\\save\\save.txt"
-	p := NewProject(config.Conf[0])
-	err = p.Open()
+	configure := `
+{
+  "project": [{
+    "switch": "on",
+    "name": "project_test",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\project",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave/sftp-test",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\project\\save.txt"
+  }
+  ]
+}
+`
+	config := new(conf.Config)
+	decode := json.NewDecoder(bytes.NewBufferString(configure))
+	err := decode.Decode(config)
 	if err != nil {
 		t.Error(err)
 	}
-
-	t.Log(p.dirs.DirMap)
-
+	t.Log(config.Conf)
+	p, err := Open(config.Conf[0])
+	if err != nil {
+		t.Error(err)
+	}
 	p.Close()
 }

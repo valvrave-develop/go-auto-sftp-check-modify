@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"errors"
 	"fmt"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -9,11 +8,9 @@ import (
 	"net"
 	"os"
 	"time"
-	"util"
 )
 
 type Sftp interface {
-	Connect() error
 	Close()
 	Put(local, remote string) error
 	Mkdir(remote string) error
@@ -40,7 +37,14 @@ func NewClient(address, user, passwd string) Sftp {
 	}
 }
 
-func (s *sftp_) Connect() error {
+func Dial(address, user, passwd string, timeout time.Duration) (Sftp, error) {
+	s := &sftp_{
+		address:address,
+		user:user,
+		passwd:passwd,
+		sshConn:    nil,
+		sftpClient: nil,
+	}
 	callBack := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return nil
 	}
@@ -50,22 +54,22 @@ func (s *sftp_) Connect() error {
 			ssh.Password(s.passwd),
 		},
 		HostKeyCallback:callBack,
-		Timeout:5*time.Second,
+		Timeout:timeout,
 	}
 	conn, err := ssh.Dial("tcp", s.address, config)
 	if err != nil {
-		return fmt.Errorf("ssh connect[%s] failed, errMsg:%v", s.address, err)
+		return nil, fmt.Errorf("ssh dial[%s] failed:%v", s.address, err)
 	}
 
 	sftp, err := sftp.NewClient(conn)
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("create sftp client to [%s] failed, errMsg:%v", s.address, err)
+		return nil, fmt.Errorf("create sftp client to [%s] failed:%v", s.address, err)
 	}
 
 	s.sshConn = conn
 	s.sftpClient = sftp
-	return nil
+	return s, nil
 }
 
 func (s *sftp_) Close(){
@@ -77,30 +81,18 @@ func (s *sftp_) Close(){
 
 //上传文件
 func (s *sftp_) Put(local, remote string) error {
-	util.LogPrint("sftp", util.I, "Put", local, fmt.Sprint(remote, " Put start"))
-	var e error
-	defer func(){
-		if e == nil {
-			util.LogPrint("sftp", util.I, "Put", local, fmt.Sprint(remote, " Put sucess"))
-		}else{
-			util.LogPrint("sftp", util.E, "Put", local, fmt.Sprint(remote, " Put errMsg:", e))
-		}
-	}()
 	localFp, err := os.Open(local)
 	if err != nil {
-		e = errors.New(fmt.Sprintf("Open %s failed:%v", local, err))
-		return e
+		return fmt.Errorf("Open %s failed:%v", local, err)
 	}
 	defer localFp.Close()
 	info, err := os.Stat(local)
 	if err != nil {
-		e = errors.New(fmt.Sprintf("Stat %s failed:%v", local, err))
-		return e
+		return fmt.Errorf("Stat %s failed:%v", local, err)
 	}
 	remoteFp,err := s.sftpClient.OpenFile(remote, os.O_CREATE | os.O_RDWR | os.O_TRUNC)
 	if err != nil {
-		e = errors.New(fmt.Sprintf("sftp OpenFile %s failed:%v", local, err))
-		return e
+		return fmt.Errorf("sftp OpenFile %s failed:%v", local, err)
 	}
 	defer remoteFp.Close()
 	total := 0
@@ -108,12 +100,10 @@ func (s *sftp_) Put(local, remote string) error {
 	for {
 		readLen, err := localFp.Read(content)
 		if err != nil && err != io.EOF{
-			e = errors.New(fmt.Sprintf("local Read %s failed:%v", local, err))
-			return e
+			return fmt.Errorf("local Read %s failed:%v", local, err)
 		}
 		if _, err := remoteFp.Write(content[:readLen]); err != nil {
-			e = errors.New(fmt.Sprintf("remote Write %s failed:%v", local, err))
-			return e
+			return fmt.Errorf("remote Write %s failed:%v", local, err)
 		}
 		if err == io.EOF {
 			break
@@ -123,70 +113,48 @@ func (s *sftp_) Put(local, remote string) error {
 			break
 		}
 	}
-	e = nil
-	return e
+	return nil
 }
 //创建目录，只支持在当前目录创建新目录
 func (s *sftp_) Mkdir(remote string) error {
-	util.LogPrint("sftp", util.I, "Mkdir", remote, "Mkdir start")
 	_, err := s.sftpClient.Stat(remote)
-	defer func(){
-		if err == nil {
-			util.LogPrint("sftp", util.I, "Mkdir", remote, "Mkdir sucess")
-		}else{
-			util.LogPrint("sftp", util.E, "Mkdir", remote, fmt.Sprint("Mkdir failed:", err))
-		}
-	}()
 	if err != nil {
 		if os.IsNotExist(err) {
 			err = s.sftpClient.Mkdir(remote)
-			return err
+			if err != nil {
+				return fmt.Errorf("sftp Mkdir %s failed:%v", remote, err)
+			}
+			return nil
 		}
-		return err
+		return fmt.Errorf("sftp Stat %s failed:%v", remote, err)
 	}
 	return nil
 }
 //删除文件，不支持删除目录
 func (s *sftp_) Remove(remote string) error {
-	util.LogPrint("sftp", util.I, "Remove", remote, "Remove start")
 	_, err := s.sftpClient.Stat(remote)
-	defer func(){
-		if err == nil {
-			util.LogPrint("sftp", util.I, "Remove", remote, "Remove sucess")
-		}else{
-			util.LogPrint("sftp", util.E, "Remove", remote, fmt.Sprint("Remove failed:", err))
-		}
-	}()
 	if err != nil {
 		if os.IsNotExist(err) {
-			err = nil
-			return err
+			return nil
 		}
-		return err
+		return fmt.Errorf("sftp Stat %s failed:%v", remote, err)
 	}
 	err = s.sftpClient.Remove(remote)
+	if err != nil {
+		return fmt.Errorf("sftp Remove %s failed:%v", remote, err)
+	}
 	return err
 }
 //删除目录
 //API本身不支持包含文件的目录
 //此时封装后的api支持删除包含文件的目录
 func (s *sftp_) RemoveDirectory(remote string) error {
-	util.LogPrint("sftp", util.I, "RemoveDirectory", remote, "RemoveDirectory start")
 	_, err := s.sftpClient.Stat(remote)
-	defer func(){
-		if err == nil {
-			util.LogPrint("sftp", util.I, "RemoveDirectory", remote, "RemoveDirectory sucess")
-		}else{
-			util.LogPrint("sftp", util.E, "RemoveDirectory", remote, fmt.Sprint("RemoveDirectory failed:", err))
-		}
-	}()
 	if err != nil {
 		if os.IsNotExist(err) {
-			err = nil
-			return err
+			return nil
 		}
-		err = errors.New(fmt.Sprintf("sftp Stat %s failed:%v", remote, err))
-		return err
+		return fmt.Errorf("sftp Stat %s failed:%v", remote, err)
 	}
 	w := s.sftpClient.Walk(remote)
 	dir := make([]string, 0, 10)
@@ -199,16 +167,14 @@ func (s *sftp_) RemoveDirectory(remote string) error {
 		}else{
 			err = s.sftpClient.Remove(w.Path())
 			if err != nil {
-				err = errors.New(fmt.Sprintf("sftp Remove %s failed:%v", w.Path(), err))
-				return err
+				return fmt.Errorf("sftp Remove %s failed:%v", w.Path(), err)
 			}
 		}
 	}
 	for i:=len(dir)-1; i>=0; i-- {
 		err = s.sftpClient.RemoveDirectory(dir[i])
 		if err != nil {
-			err = errors.New(fmt.Sprintf("sftp RemoveDirectory %s failed:%v", dir[i], err))
-			return err
+			return fmt.Errorf("sftp RemoveDirectory %s failed:%v", dir[i], err)
 		}
 	}
 	return nil

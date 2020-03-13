@@ -22,7 +22,7 @@
     "passwd": "valvrave",
     "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\dstorage-parking-token-save.txt"
   },{
-      "switch": "on",
+      "switch": "off",
       "name": "dstorage",
       "local_os": "Windows",
       "local_base_dir": "E:\\workspace\\go\\dstorage",
@@ -32,6 +32,39 @@
       "user": "valvrave",
       "passwd": "valvrave",
       "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\dstorage.txt"
-    }
+    },{
+    "switch": "off",
+    "name": "go-pkg",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\workspace\\go-pkg\\src",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave/go-pkg",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\go-pkg.txt"
+  },{
+    "switch": "on",
+    "name": "valvrave-test",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\workspace\\go\\valvrave-test",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave/workspace/go",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\valvrave-test.txt"
+  },{
+    "switch": "on",
+    "name": "software",
+    "local_os": "Windows",
+    "local_base_dir": "E:\\SoftWare",
+    "remote_os": "Linux",
+    "remote_base_dir": "/home/valvrave",
+    "remote_address": "192.168.56.101:22",
+    "user": "valvrave",
+    "passwd": "valvrave",
+    "save_project": "E:\\workspace\\go\\go-auto-sftp-check-modify\\src\\save\\software.txt"
+  }
   ]
 }
