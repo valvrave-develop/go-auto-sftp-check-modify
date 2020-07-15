@@ -27,7 +27,7 @@ type ProjectConfig struct {
 
 func InitConfig() (*Config, error) {
 	config := new(Config)
-	configFile := fmt.Sprintf("%s%setc%sproject.json", os.Args[0], string(filepath.Separator), string(filepath.Separator))
+	configFile := fmt.Sprintf("%s%setc%sproject.json", filepath.Dir(os.Args[0]), string(filepath.Separator), string(filepath.Separator))
 	if len(os.Args) >= 2 && len(os.Args[1]) != 0 {
 		configFile = os.Args[1]
 	}
