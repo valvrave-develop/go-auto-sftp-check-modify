@@ -40,7 +40,7 @@ func (h *HttpServerHandle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func WebServerStart(projects map[string]*project.Project){
 	handle := &HttpServerHandle{projects:projects}
 	handle.RegisterRouters()
-	if err := http.ListenAndServe(":8090", handle); err != nil {
+	if err := http.ListenAndServe(":7090", handle); err != nil {
 		fmt.Println("http server listen failed:", err)
 	}
 

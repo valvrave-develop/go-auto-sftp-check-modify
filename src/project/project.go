@@ -5,9 +5,8 @@ import (
 	"context"
 	"dir"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
+	"runtime/debug"
 	"sftp"
 	"strings"
 	"sync"
@@ -15,196 +14,155 @@ import (
 	"util"
 )
 
-const (
-	sftpTimeout = 5 * time.Second
-)
-
 type Project struct {
-	ProjectName string
-	User string
-	Passwd string
-	LocalBaseDir string
-	LocalSeparator string
-	RemoteAddress string
-	RemoteBaseDir string
-	RemoteSeparator string
-	SaveProject string
-	Dirs *dir.Directory
-
-	localSeparator string
+	Dirs            *dir.Directory
+	config          *conf.ProjectConfig
+	remoteAddress   *sftp.RemoteIpAddress
+	sftpClient      sftp.Sftp
+	localSeparator  string
 	remoteSeparator string
-	dirFp *os.File
-	fp *os.File
-	client sftp.Sftp
-	ctx context.Context
-	cancel context.CancelFunc
-	group sync.WaitGroup
+	context         context.Context
+	cancel          context.CancelFunc
+	group           sync.WaitGroup
 }
 
-func newProject(conf *conf.ProjectConfig) *Project {
+func NewProject(config *conf.ProjectConfig) *Project {
 	project := &Project{
-		ProjectName:conf.Name,
-		User:conf.User,
-		Passwd:conf.Passwd,
-		LocalBaseDir:conf.LocalBaseDir,
-		RemoteAddress:conf.RemoteAddress,
-		RemoteBaseDir:conf.RemoteBaseDir,
-		SaveProject:conf.SaveProject,
-		localSeparator:separator(conf.LocalOs),
-		remoteSeparator:separator(conf.RemoteOs),
-		dirFp:nil,
-		fp:nil,
-		Dirs:dir.New(),
-		group:sync.WaitGroup{},
+		config: config,
+		remoteAddress: &sftp.RemoteIpAddress{
+			Address: config.RemoteAddress,
+			User:    config.User,
+			Passwd:  config.Passwd,
+			TimeOut: 5 * time.Second,
+		},
+		sftpClient:      nil,
+		Dirs:            dir.New(),
+		localSeparator:  separator(config.LocalOs),
+		remoteSeparator: separator(config.RemoteOs),
+		group:           sync.WaitGroup{},
 	}
-	project.ctx, project.cancel = context.WithCancel(context.Background())
+	project.context, project.cancel = context.WithCancel(context.Background())
+	go project.run()
 	return project
 }
 
-func Open(conf *conf.ProjectConfig) (*Project, error) {
-	p := newProject(conf)
-	if !filepath.IsAbs(p.LocalBaseDir) {
-		return nil, fmt.Errorf("%s is not absolute path", p.LocalBaseDir)
+func (p *Project) Close() {
+	p.cancel()
+	if p.sftpClient != nil {
+		p.sftpClient.Close()
 	}
-	//锁住当前基目录，防止被手动删除
-	if dirFp, err := os.OpenFile(p.LocalBaseDir, os.O_RDONLY, os.ModeDir); err != nil {
-		return nil, err
-	}else{
-		p.dirFp = dirFp
-	}
-	cli,err := sftp.Dial(p.RemoteAddress, p.User, p.Passwd, sftpTimeout)
-	if err != nil{
-		return  nil, err
-	}
-	p.client = cli
-	p.fp, err = os.OpenFile(p.SaveProject, os.O_RDWR, 0666)
+	p.group.Wait()
+}
+
+func (p *Project) init() {
+	cli, err := sftp.Dial(p.remoteAddress)
 	if err != nil {
-		if os.IsNotExist(err) {
-			if p.fp, err = os.Create(p.SaveProject); err != nil {
-				return nil, err
-			}
-			defer func(){
-				if err != nil {
-					p.fp.Close()
+		panic(err)
+	}
+	p.sftpClient = cli
+
+	if err := p.read(); err != nil {
+		panic(err)
+	}
+}
+
+func (p *Project) run() {
+	p.init()
+	checkTicker := time.NewTicker(2 * time.Second)
+	saveTicker := time.NewTicker(10 * time.Minute)
+	p.group.Add(1)
+	defer func() {
+		checkTicker.Stop()
+		saveTicker.Stop()
+		if err := p.write(); err != nil {
+			util.LogPrint("project", util.E, "Close", p.config.Name, fmt.Sprint("write failed:", err))
+		}
+		p.group.Done()
+	}()
+	for {
+		select {
+		case <-p.context.Done():
+			util.LogPrint("project", util.I, "Run", p.config.Name, "watch finish")
+			return
+		case <-checkTicker.C:
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						util.LogPrint("project", util.E, "Panic", p.config.Name, fmt.Sprint(err, "\n", string(debug.Stack())))
+					}
+				}()
+				if res, err := p.Dirs.CheckModify(); err != nil {
+					util.LogPrint("project", util.E, "Run", p.config.Name, fmt.Sprint("check modify failed:", err))
+				} else {
+					if len(res) > 0 {
+						util.LogPrint("project", util.I, "Run", p.config.Name, fmt.Sprint("upload start:", res))
+						if err := p.sftp(res); err != nil {
+							util.LogPrint("project", util.E, "Run", p.config.Name, fmt.Sprint("sftp upload failed:", err))
+						} else {
+							util.LogPrint("project", util.I, "Run", p.config.Name, "upload finish")
+						}
+					}
 				}
 			}()
-			if err = p.Dirs.Open(p.LocalBaseDir); err != nil { //遍历
-				return nil, err
-			}
-			if err = p.sftp([]string{p.LocalBaseDir}); err != nil {          //上传
-				return nil,  err
-			}
-			if err := p.write(); err != nil {    //保存
-				return nil, err
-			}
-		}else {
-			return nil, err
-		}
-	}else{
-		if err := p.read(); err != nil {
-			p.fp.Close()
-			return nil, err
-		}
-	}
-	go p.run()
-	return p, nil
-}
-func (p *Project) Close(){
-	p.cancel()
-	p.group.Wait()
-	p.write()
-	p.dirFp.Close()
-	p.fp.Close()
-	p.client.Close()
-}
-
-
-func (p *Project) run(){
-	run := func(){
-		p.group.Add(1)
-		checkTimer := time.NewTicker(2 * time.Second)
-		saveTimer := time.NewTicker(30 * time.Minute)
-		modifyCh := make(chan []string)
-		defer func(){
-			checkTimer.Stop()
-			saveTimer.Stop()
-			close(modifyCh)
-			p.group.Done()
-		}()
-		var e error
-		for {
-			e = nil
-			util.LogPrint("project", util.I, "Run",p.ProjectName,"watch")
-			select {
-			case <-p.ctx.Done():
-				util.LogPrint("project", util.I, "Run",p.ProjectName,"watch finish")
-				return
-			case <-checkTimer.C:
-				if res, err := p.Dirs.CheckModify(); err != nil {
-					e = fmt.Errorf("check failed:", err)
-				}else{
-					if len(res) >0 {
-						util.LogPrint("project", util.I, "Run",p.ProjectName, fmt.Sprint("modify:", res))
-						go func(){
-							defer func(){
-								recover()
-							}()
-							modifyCh <- res
-						}()
-					}
-				}
-			case <-saveTimer.C:
-				if err := p.write(); err != nil {
-					e = fmt.Errorf("save failed:", err)
-				}
-			case res, ok := <-modifyCh:
-				if ok {
-					if err := p.sftp(res); err != nil {
-						e = fmt.Errorf("upload failed:", err)
-					}
-					util.LogPrint("project", util.I, "Run",p.ProjectName, fmt.Sprint("upload finish:", res))
-				}
-			}
-			if e != nil {
-				util.LogPrint("project", util.I, "Run",p.ProjectName,fmt.Sprint("watch failed:", e))
+		case <-saveTicker.C:
+			if err := p.write(); err != nil {
+				util.LogPrint("project", util.E, "Run", p.config.Name, fmt.Sprint("save file failed:", err))
 			}
 		}
 	}
-	go run()
 }
 
 func (p *Project) write() error {
-	p.fp.Truncate(0)
-	p.fp.Seek(0, io.SeekStart)
-	if err := p.Dirs.EncodeJson(p.fp); err != nil {
+	temp := fmt.Sprint(p.config.SaveProject, ".temp")
+	err := func() error {
+		fp, err := os.Create(temp)
+		if err != nil {
+			return err
+		}
+		defer fp.Close()
+		if err := p.Dirs.EncodeJson(fp); err != nil {
+			return err
+		}
+		return nil
+	}()
+	if err != nil {
+		os.Remove(temp)
 		return err
 	}
-	if err := p.fp.Sync(); err != nil {
-		return err
-	}
-	return nil
+	return os.Rename(temp, p.config.SaveProject)
 }
 func (p *Project) read() error {
-	return p.Dirs.DecodeJson(p.fp)
+	fp, err := os.Open(p.config.SaveProject)
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = p.Dirs.Open(p.config.LocalBaseDir)
+			if err != nil {
+				return err
+			}
+			return p.Dirs.Upload(p.sftpClient, p.config.LocalBaseDir, p.config.RemoteBaseDir, p.localSeparator, p.remoteSeparator, []string{p.Dirs.Dir.Name})
+		}
+		return err
+	}
+	defer fp.Close()
+	return p.Dirs.DecodeJson(fp)
 }
 
-func (p *Project) sftp( modify []string) error {
-	err := p.Dirs.Upload(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
-	for i:=1; i>=0; i-- {
+func (p *Project) sftp(modify []string) error {
+	err := p.Dirs.Upload(p.sftpClient, p.config.LocalBaseDir, p.config.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
+	for i := 1; i >= 0; i-- {
 		if err == nil {
 			return err
 		}
-		cli,err := sftp.Dial(p.RemoteAddress, p.User, p.Passwd, sftpTimeout)
-		if err != nil{
-			return  err
+		cli, err := sftp.Dial(p.remoteAddress)
+		if err != nil {
+			return err
 		}
-		p.client.Close()
-		p.client = cli
-		err = p.Dirs.Upload(p.client, p.LocalBaseDir, p.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
+		p.sftpClient.Close()
+		p.sftpClient = cli
+		err = p.Dirs.Upload(p.sftpClient, p.config.LocalBaseDir, p.config.RemoteBaseDir, p.localSeparator, p.remoteSeparator, modify)
 	}
 	return err
 }
-
 
 func separator(os string) string {
 	osUpper := strings.ToUpper(os)

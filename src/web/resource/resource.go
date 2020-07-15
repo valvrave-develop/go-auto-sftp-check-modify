@@ -43,28 +43,28 @@ func (d *DirTreeResource) Get(path string) string {
 		return nil
 	}
 	osPath := strings.Join(strings.Split(path, "/"), fmt.Sprintf("%c", os.PathSeparator))
-	basePath := filepath.Dir(d.Project.Dirs.Dir.DirName)
+	basePath := filepath.Dir(d.Project.Dirs.Dir.Name)
 	obsPath := fmt.Sprintf("%s%c%s", basePath, os.PathSeparator, osPath)
-	if _, ok := d.Project.Dirs.DirMap[obsPath]; !ok {
+	if _, ok := d.Project.Dirs.Index[obsPath]; !ok {
 		return "Not Found"
 	}
-	err := printDirTree(d.Project.Dirs.DirMap[obsPath], 0, format, buffer)
+	err := printDirTree(d.Project.Dirs.Index[obsPath], 0, format, buffer)
 	if err != nil {
 		return "error"
 	}
 	return buffer.String()
 }
 
-func printDirTree(dir *dir.DirectoryStruct, n int, format func(n int) error, w *bytes.Buffer) error {
+func printDirTree(dir *dir.Dir, n int, format func(n int) error, w *bytes.Buffer) error {
 	err := format(2 * n)
 	if err != nil {
 		return err
 	}
-	_, err = w.WriteString(fmt.Sprintf("%s:%d\n", filepath.Base(dir.DirName), dir.Status))
+	_, err = w.WriteString(fmt.Sprintf("%s:%d\n", filepath.Base(dir.Name), dir.Status))
 	if err != nil {
 		return err
 	}
-	for _, file := range dir.File{
+	for _, file := range dir.Files{
 		err := format(2 * (n+1))
 		if err != nil {
 			return err
@@ -74,7 +74,7 @@ func printDirTree(dir *dir.DirectoryStruct, n int, format func(n int) error, w *
 			return err
 		}
 	}
-	for _, child := range dir.DirChild{
+	for _, child := range dir.ChildDirs{
 		err = printDirTree(child, n+1, format, w)
 		if err != nil {
 			return err

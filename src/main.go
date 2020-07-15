@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"project"
 	"syscall"
-	"util"
 	"web"
 )
 
@@ -28,12 +27,7 @@ func main(){
 		if conf.Switch != "on" {
 			continue
 		}
-		p, err := project.Open(conf)
-		if err != nil {
-			util.LogPrint("Start", util.E, "main",p.ProjectName,fmt.Sprint(p.ProjectName, " start failed, err:", err))
-			continue
-		}
-		projects[conf.Name] = p
+		projects[conf.Name] = project.NewProject(conf)
 	}
 	go web.WebServerStart(projects)
 	wait()

@@ -18,7 +18,7 @@ const (
 	LogFile = `E:\workspace\go\go-auto-sftp-check-modify\src\log\error.log`
 )
 
-var recordLog *os.File
+var RecordLog *os.File
 var chanLog chan string
 
 func init() {
@@ -30,13 +30,13 @@ func init() {
 	if err != nil {
 		panic(fmt.Sprintf("create log file failed, fileName:%s", LogFile))
 	}
-	recordLog = fp
+	RecordLog = fp
 	chanLog = make(chan string, 100)
 	go func(){
 		for  {
 			select {
 			case res := <-chanLog:
-				recordLog.WriteString(res)
+				RecordLog.WriteString(res)
 			}
 		}
 	}()
